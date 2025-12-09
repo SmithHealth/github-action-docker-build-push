@@ -241,13 +241,18 @@ runs:
 
         # Prefer the metadata file emitted by docker/build-push-action (avoids shell quoting pitfalls).
         metadata_file="${{ steps.docker-build-push-action.outputs.metadata-file }}"
-        if [ -n "$metadata_file" ] && [ -f "$metadata_file" ]; then
-          metadata=$(jq -c . "$metadata_file")
-        else
-          # Fallback to the raw metadata output; read from the action output safely.
-          metadata_raw="${{ steps.docker-build-push-action.outputs.metadata }}"
-          metadata=$(printf '%s' "$metadata_raw" | jq -c .)
+
+        # Some buildx versions omit metadata-file; fall back to the raw output, but
+        # write it to a temp file via heredoc so embedded quotes/newlines cannot
+        # break shell parsing.
+        if [ -z "$metadata_file" ] || [ ! -f "$metadata_file" ]; then
+          metadata_file="$(mktemp)"
+          cat <<'EOF' > "$metadata_file"
+${{ steps.docker-build-push-action.outputs.metadata }}
+EOF
         fi
+
+        metadata=$(jq -c . "$metadata_file")
 
         echo "metadata=$metadata" >> "$GITHUB_OUTPUT"
         echo "## Docker Image Metadata" >> "$GITHUB_STEP_SUMMARY"
