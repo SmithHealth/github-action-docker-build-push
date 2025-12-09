@@ -246,10 +246,10 @@ runs:
         # write it to a temp file via heredoc so embedded quotes/newlines cannot
         # break shell parsing.
         if [ -z "$metadata_file" ] || [ ! -f "$metadata_file" ]; then
-          metadata_file="$(mktemp)"
-          cat <<'EOF' > "$metadata_file"
-${{ steps.docker-build-push-action.outputs.metadata }}
-EOF
+        metadata_file="$(mktemp)"
+        cat <<'EOF' > "$metadata_file"
+        ${{ steps.docker-build-push-action.outputs.metadata }}
+        EOF
         fi
 
         metadata=$(jq -c . "$metadata_file")
