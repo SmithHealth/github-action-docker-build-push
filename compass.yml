@@ -1,0 +1,16 @@
+name: github-action-docker-build-push
+id: ari:cloud:compass:45098346-acb2-49e5-8728-5de1791c3d8b:component/038e10e3-523b-4b16-a4f1-d06fd262f52b/7f373b54-2a00-4636-9e53-6252e1522103
+description: Fork of CP Simple docker build action
+configVersion: 1
+typeId: SERVICE
+fields:
+  tier: 4
+links:
+  - name: null
+    type: REPOSITORY
+    url: https://github.com/SmithHealth/github-action-docker-build-push
+relationships:
+  DEPENDS_ON: []
+labels:
+  - source:github
+customFields: null
