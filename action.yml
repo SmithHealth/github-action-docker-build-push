@@ -244,11 +244,8 @@ runs:
         if [ -n "$metadata_file" ] && [ -f "$metadata_file" ]; then
           metadata=$(jq -c . "$metadata_file")
         else
-          # Fallback to the raw metadata output; capture via heredoc to preserve JSON safely.
-          metadata_raw=$(cat <<'EOF'
-${{ steps.docker-build-push-action.outputs.metadata }}
-EOF
-)
+          # Fallback to the raw metadata output; read from the action output safely.
+          metadata_raw="${{ steps.docker-build-push-action.outputs.metadata }}"
           metadata=$(printf '%s' "$metadata_raw" | jq -c .)
         fi
 
