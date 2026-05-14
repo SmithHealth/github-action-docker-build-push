@@ -211,31 +211,143 @@ runs:
         password: ${{ inputs.password }}
 
 
-    - name: Build and push Docker images
-      # Do not update to >=v6 untill the issue would be solved
-      # https://github.com/docker/build-push-action/issues/1167
-      uses: docker/build-push-action@v5
+    # Replaces docker/build-push-action@v5 with a direct `docker buildx build --push`
+    # invocation wrapped in a throttle-aware retry loop. ECR's PutImage TPS limits
+    # cause "toomanyrequests: Rate exceeded" failures when many matrix jobs push
+    # simultaneously; this loop detects only those errors (not real build failures)
+    # and retries with exponential backoff + jitter to avoid thundering-herd retries.
+    #
+    # Inputs are passed via env: rather than inline ${{ }} expansion to prevent shell
+    # injection from arbitrary user-supplied values (tags, labels, build-args, etc.).
+    - name: Build and push Docker images (throttle-aware retry)
       id: docker-build-push-action
-      with:
-        allow: ${{ inputs.allow }}
-        network: ${{ inputs.network }}
-        context: ${{ inputs.workdir }}
-        file: ${{ inputs.workdir }}/${{ inputs.file }}
-        pull: true
-        push: true
-        ssh: ${{ inputs.ssh }}
-        build-args: ${{ inputs.build-args }}
-        build-contexts: ${{ inputs.build-contexts }}
-        cache-from: ${{ inputs.cache-from }}
-        cache-to: ${{ inputs.cache-to }}
-        no-cache: ${{ inputs.no-cache }}
-        tags: ${{ steps.meta.outputs.tags }}
-        target: ${{ inputs.target }}
-        labels: ${{ steps.meta.outputs.labels }}
-        platforms: ${{ inputs.platforms }}
-        provenance: ${{ inputs.provenance }}
-        secrets: ${{ inputs.secrets }}
-        secret-files: ${{ inputs.secret-files }}
+      shell: bash
+      env:
+        IN_ALLOW: ${{ inputs.allow }}
+        IN_NETWORK: ${{ inputs.network }}
+        IN_WORKDIR: ${{ inputs.workdir }}
+        IN_FILE: ${{ inputs.file }}
+        IN_SSH: ${{ inputs.ssh }}
+        IN_BUILD_ARGS: ${{ inputs.build-args }}
+        IN_BUILD_CONTEXTS: ${{ inputs.build-contexts }}
+        IN_CACHE_FROM: ${{ inputs.cache-from }}
+        IN_CACHE_TO: ${{ inputs.cache-to }}
+        IN_NO_CACHE: ${{ inputs.no-cache }}
+        IN_TAGS: ${{ steps.meta.outputs.tags }}
+        IN_TARGET: ${{ inputs.target }}
+        IN_LABELS: ${{ steps.meta.outputs.labels }}
+        IN_PLATFORMS: ${{ inputs.platforms }}
+        IN_PROVENANCE: ${{ inputs.provenance }}
+        IN_SECRETS: ${{ inputs.secrets }}
+        IN_SECRET_FILES: ${{ inputs.secret-files }}
+      run: |
+        set -uo pipefail
+
+        metadata_file="$(mktemp -t buildx-metadata.XXXXXX.json)"
+        args=(buildx build --pull --push --metadata-file "$metadata_file")
+
+        # Append `--flag VALUE` for each non-empty newline-delimited entry.
+        add_repeated() {
+          local flag="$1" value="$2"
+          [ -z "$value" ] && return 0
+          while IFS= read -r line; do
+            [ -n "$line" ] && args+=("$flag" "$line")
+          done <<< "$value"
+        }
+
+        # Append `--flag VALUE` if value is non-empty.
+        add_single() {
+          local flag="$1" value="$2"
+          [ -n "$value" ] && args+=("$flag" "$value")
+        }
+
+        add_repeated --allow         "$IN_ALLOW"
+        add_single   --network       "$IN_NETWORK"
+        add_single   --file          "$IN_WORKDIR/$IN_FILE"
+        add_single   --ssh           "$IN_SSH"
+        add_repeated --build-arg     "$IN_BUILD_ARGS"
+        add_repeated --build-context "$IN_BUILD_CONTEXTS"
+        add_repeated --cache-from    "$IN_CACHE_FROM"
+        add_repeated --cache-to      "$IN_CACHE_TO"
+        [ "$IN_NO_CACHE" = "true" ] && args+=(--no-cache)
+        add_repeated --tag           "$IN_TAGS"
+        add_single   --target        "$IN_TARGET"
+        add_repeated --label         "$IN_LABELS"
+        add_single   --platform      "$IN_PLATFORMS"
+        # provenance uses --flag=VALUE form so `false` is parsed as a boolean.
+        [ -n "$IN_PROVENANCE" ] && args+=("--provenance=$IN_PROVENANCE")
+
+        # Secrets: each `KEY=VALUE` line becomes an env-backed buildkit secret
+        # (kept out of process args / docker history). Multi-line secret values
+        # are not supported here; use secret-files for those.
+        if [ -n "$IN_SECRETS" ]; then
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            key="${line%%=*}"
+            value="${line#*=}"
+            envname="BUILDX_SECRET_${key}"
+            export "$envname=$value"
+            args+=(--secret "id=${key},env=${envname}")
+          done <<< "$IN_SECRETS"
+        fi
+
+        if [ -n "$IN_SECRET_FILES" ]; then
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            key="${line%%=*}"
+            path="${line#*=}"
+            args+=(--secret "id=${key},src=${path}")
+          done <<< "$IN_SECRET_FILES"
+        fi
+
+        args+=("$IN_WORKDIR")
+
+        max_attempts=4
+        base_delay=15
+        attempt=1
+
+        while : ; do
+          log="$(mktemp)"
+          echo "::group::buildx attempt ${attempt}/${max_attempts}"
+          docker "${args[@]}" 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          echo "::endgroup::"
+
+          if [ "$rc" -eq 0 ]; then
+            break
+          fi
+
+          # Only retry registry throttling. Real build errors fail fast.
+          if ! grep -qiE "toomanyrequests|rate exceeded|throttl" "$log"; then
+            echo "::error::buildx failed (rc=$rc); error is not a registry throttle, not retrying."
+            exit "$rc"
+          fi
+
+          if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "::error::ECR throttling persisted after ${max_attempts} attempts."
+            exit "$rc"
+          fi
+
+          # Exponential backoff (15s, 30s, 60s, ...) plus 0-29s jitter to
+          # desynchronize concurrent matrix-job retries.
+          delay=$(( base_delay * (2 ** (attempt - 1)) ))
+          jitter=$(( RANDOM % 30 ))
+          total=$(( delay + jitter ))
+          echo "::warning::ECR throttled — sleeping ${total}s before retry $((attempt + 1))/${max_attempts}."
+          sleep "$total"
+          attempt=$(( attempt + 1 ))
+        done
+
+        # Emit the same outputs docker/build-push-action would have, so the
+        # downstream "Get Metadata" step (which keys off this step's id) is
+        # unaffected.
+        echo "metadata-file=$metadata_file" >> "$GITHUB_OUTPUT"
+        {
+          echo 'metadata<<BUILDX_METADATA_EOF'
+          cat "$metadata_file"
+          echo
+          echo 'BUILDX_METADATA_EOF'
+        } >> "$GITHUB_OUTPUT"
 
     - name: Get Metadata
       id: get-metadata
