@@ -98,7 +98,7 @@ inputs:
     required: false
     default: "false"
   inspect:
-    description: "Set to `true` will pull and inspect the image and output it."
+    description: "Set to `true` will inspect the image from the registry and output it."
     required: false
     default: "false"
   summary:
@@ -247,36 +247,49 @@ runs:
       id: inspect
       if: ${{ inputs.summary == 'true' }}
       shell: bash
+      env:
+        IMAGE_REF: "${{ inputs.registry }}/${{ steps.image_name.outputs.image_name }}:${{ steps.tag.outputs.output }}"
+        IMAGE_TAG: "${{ steps.tag.outputs.output }}"
       run: |
-        docker pull "${{ inputs.registry }}/${{ steps.image_name.outputs.image_name }}:${{ steps.tag.outputs.output }}"
-        docker inspect "${{ inputs.registry }}/${{ steps.image_name.outputs.image_name }}:${{ steps.tag.outputs.output }}" > inspect.json
-        metadata=$(jq -c < inspect.json)
-        echo "metadata=$metadata" >> $GITHUB_OUTPUT
-    
+        set -euo pipefail
+
+        # Registry-side inspect, not `docker pull` + `docker inspect`. The pull ran on
+        # the runner's own architecture, so it failed outright whenever the image was
+        # not built for the runner -- a linux/arm64 build on an amd64 runner reads as a
+        # build failure long after the push succeeded -- and for a multi-platform index
+        # it quietly described whichever variant the runner resolved. imagetools reads
+        # the manifest straight from the registry: no layer download, every platform
+        # reported, and the same result whatever the runner is. It also keeps this step
+        # honest as a post-push check that the tag really is resolvable in ECR.
+        docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .}}' > inspect.json
+
+        # `.image` is a bare config object for a single-platform image and a map keyed
+        # by "os/arch" for an index. Normalise to the map so everything below reads one
+        # shape. Attestation manifests never appear here, only real platforms.
+        jq 'if (.image | has("config"))
+              then .image = {"\(.image.os)/\(.image.architecture)": .image}
+              else . end' inspect.json > normalised.json
+        mv normalised.json inspect.json
+
+        echo "metadata=$(jq -c '.' inspect.json)" >> "$GITHUB_OUTPUT"
+
         # ── parse fields ────────────────────────────────────────────────────────
-        IMAGE_NAME=$(jq -r '.[0].RepoTags[0] | split(":")[0] | split("/")[-1]' inspect.json)
-        IMAGE_REPO=$(jq -r '.[0].RepoTags[0] | split(":")[0]'                  inspect.json)
-        TAG=$(jq -r        '.[0].RepoTags[0] | split(":")[1]'                  inspect.json)
-        DIGEST=$(jq -r     '.[0].RepoDigests[0] | split("@")[1]'               inspect.json)
-        IMAGE_ID=$(jq -r   '.[0].Id'                                            inspect.json)
-        REVISION=$(jq -r   '.[0].Config.Labels["org.opencontainers.image.revision"] // "n/a"' inspect.json)
-        SOURCE=$(jq -r     '.[0].Config.Labels["org.opencontainers.image.source"] // "n/a"'   inspect.json)
-        LICENSE=$(jq -r    '.[0].Config.Labels["org.opencontainers.image.licenses"] // "n/a"' inspect.json)
-        DESCRIPTION=$(jq -r '.[0].Config.Labels["org.opencontainers.image.description"] // ""' inspect.json)
-        ARCH=$(jq -r       '.[0].Architecture'                                  inspect.json)
-        OS=$(jq -r         '.[0].Os'                                            inspect.json)
-        SIZE_BYTES=$(jq -r '.[0].Size'                                          inspect.json)
-        SIZE_MB=$(echo "scale=1; $SIZE_BYTES / 1048576" | bc)
-        LAYER_COUNT=$(jq   '.[0].RootFS.Layers // [] | length'                  inspect.json)
-        PORTS=$(jq -r      '.[0].Config.ExposedPorts // {} | keys | join(", ")' inspect.json)
-        ENTRYPOINT=$(jq -r '.[0].Config.Entrypoint // [] | join(" ")'           inspect.json)
-        CMD=$(jq -r        '.[0].Config.Cmd // [] | join(" ")'                  inspect.json)
-        STOP_SIGNAL=$(jq -r '.[0].Config.StopSignal // "n/a"'                   inspect.json)
-        DRIVER=$(jq -r     '.[0].GraphDriver.Name'                              inspect.json)
-    
+        # Labels are identical across platforms in a single build, so the header reads
+        # them off the first entry; anything genuinely per-platform is tabulated below.
+        # Strip the tag, not everything after the first colon -- a registry host can
+        # carry a port (localhost:5000/foo:tag).
+        IMAGE_REPO=$(jq -r '.name | sub(":[^:/]+$"; "")'            inspect.json)
+        DIGEST=$(jq -r     '.manifest.digest'                       inspect.json)
+        PLATFORMS=$(jq -r  '.image | keys | join(", ")'             inspect.json)
+        FIRST='.image | to_entries[0].value'
+        REVISION=$(jq -r    "$FIRST | .config.Labels[\"org.opencontainers.image.revision\"] // \"n/a\"" inspect.json)
+        SOURCE=$(jq -r      "$FIRST | .config.Labels[\"org.opencontainers.image.source\"] // \"n/a\""   inspect.json)
+        LICENSE=$(jq -r     "$FIRST | .config.Labels[\"org.opencontainers.image.licenses\"] // \"n/a\"" inspect.json)
+        DESCRIPTION=$(jq -r "$FIRST | .config.Labels[\"org.opencontainers.image.description\"] // \"\"" inspect.json)
+
         # ── summary ─────────────────────────────────────────────────────────────
         {
-          echo "## 🐳 ${IMAGE_REPO}  &nbsp; \`${SIZE_MB} MB\` &nbsp; \`${LICENSE}\` &nbsp; \`${ARCH}\` &nbsp; \`${OS}\`"
+          echo "## 🐳 ${IMAGE_REPO}  &nbsp; \`${LICENSE}\` &nbsp; \`${PLATFORMS}\`"
           echo ""
           if [[ -n "${DESCRIPTION}" ]]; then
             echo "${DESCRIPTION}"
@@ -284,64 +297,63 @@ runs:
           fi
           echo "---"
           echo ""
-    
+
           echo "| Field | Value |"
           echo "|---|---|"
-          echo "| Tag | \`${TAG}\` |"
+          echo "| Tag | \`${IMAGE_TAG}\` |"
           echo "| Digest | \`${DIGEST}\` |"
-          echo "| Image ID | \`${IMAGE_ID}\` |"
+          echo "| Platforms | \`${PLATFORMS}\` |"
           echo "| Revision | \`${REVISION}\` |"
           echo "| Source | ${SOURCE} |"
           echo ""
-    
-          # runtime (collapsible)
+
+          # runtime, per platform (collapsible)
           echo "<details>"
           echo "<summary>⚙️ Runtime</summary>"
           echo ""
-          echo "| Field | Value |"
-          echo "|---|---|"
-          echo "| Entrypoint | \`${ENTRYPOINT}\` |"
-          echo "| Command | \`${CMD}\` |"
-          echo "| Stop signal | \`${STOP_SIGNAL}\` |"
-          echo "| Storage driver | \`${DRIVER}\` |"
-          echo "| Exposed ports | \`${PORTS}\` |"
+          echo "| Platform | Entrypoint | Command | Stop signal | Exposed ports | Layers |"
+          echo "|---|---|---|---|---|---|"
+          jq -r '.image | to_entries[] |
+            "| `\(.key)` | `\(.value.config.Entrypoint // [] | join(" "))` | `\(.value.config.Cmd // [] | join(" "))` | `\(.value.config.StopSignal // "n/a")` | `\(.value.config.ExposedPorts // {} | keys | join(", "))` | \(.value.rootfs.diff_ids // [] | length) |"' inspect.json
           echo ""
           echo "</details>"
           echo ""
-    
+
           # env vars (collapsible)
           echo "<details>"
           echo "<summary>🌱 Environment variables</summary>"
           echo ""
-          echo "| Variable | Value |"
-          echo "|---|---|"
-          jq -r '.[0].Config.Env // [] | .[] | split("=") | "| `\(.[0])` | `\(.[1:] | join("="))` |"' inspect.json
+          echo "| Platform | Variable | Value |"
+          echo "|---|---|---|"
+          jq -r '.image | to_entries[] as $p | $p.value.config.Env // [] | .[] | split("=") |
+            "| `\($p.key)` | `\(.[0])` | `\(.[1:] | join("="))` |"' inspect.json
           echo ""
           echo "</details>"
           echo ""
-    
+
           # labels (collapsible)
           echo "<details>"
           echo "<summary>🔖 Labels</summary>"
           echo ""
           echo "| Label | Value |"
           echo "|---|---|"
-          jq -r '.[0].Config.Labels // {} | to_entries[] | "| `\(.key)` | `\(.value)` |"' inspect.json
+          jq -r '.image | to_entries[0].value.config.Labels // {} | to_entries[] | "| `\(.key)` | `\(.value)` |"' inspect.json
           echo ""
           echo "</details>"
           echo ""
-    
-          # layers (collapsible)
+
+          # layers, per platform (collapsible)
           echo "<details>"
-          echo "<summary>📦 Layers (${LAYER_COUNT})</summary>"
+          echo "<summary>📦 Layers</summary>"
           echo ""
-          echo "| # | Digest |"
-          echo "|---|---|"
-          jq -r '.[0].RootFS.Layers // [] | to_entries[] | "| \(.key + 1) | `\(.value)` |"' inspect.json
+          echo "| Platform | # | Digest |"
+          echo "|---|---|---|"
+          jq -r '.image | to_entries[] as $p | $p.value.rootfs.diff_ids // [] | to_entries[] |
+            "| `\($p.key)` | \(.key + 1) | `\(.value)` |"' inspect.json
           echo ""
           echo "</details>"
           echo ""
-    
+
           # raw json (collapsible)
           echo "<details>"
           echo "<summary>📄 Raw JSON</summary>"
@@ -351,5 +363,5 @@ runs:
           echo '```'
           echo ""
           echo "</details>"
-    
+
         } >> $GITHUB_STEP_SUMMARY
