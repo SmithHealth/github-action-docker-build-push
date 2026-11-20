@@ -1,9 +1,9 @@
-name: 'Docker build and push'
-description: 'Simple Docker build and push action'
+name: "Docker build and push"
+description: "Simple Docker build and push action"
 author: hello@cloudposse.com
 branding:
-  icon: 'box'
-  color: 'white'
+  icon: "box"
+  color: "white"
 inputs:
   allow:
     description: "List of extra privileged entitlement (e.g., network.host,security.insecure)"
@@ -15,60 +15,69 @@ inputs:
     description: "List of additional build contexts (e.g., name=path)"
     required: false
   buildkitd-flags:
-    description: 'BuildKit daemon flags'
-    default: '--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host'
+    description: "BuildKit daemon flags"
+    default: "--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host"
     required: false
   driver-opts:
-    description: 'List of additional driver-specific options. (eg. image=moby/buildkit:master)'
+    description: "List of additional driver-specific options. (eg. image=moby/buildkit:master)"
     required: false
     default: image=public.ecr.aws/vend/moby/buildkit:buildx-stable-1
   binfmt-image:
-    description: 'Binfmt image'
+    description: "Binfmt image"
     required: false
     default: public.ecr.aws/eks-distro-build-tooling/binfmt-misc:qemu-v7.0.0
   workdir:
-    description: 'Working directory'
+    description: "Working directory"
     required: false
-    default: './'
+    default: "./"
   file:
-    description: 'Dockerfile name'
+    description: "Dockerfile name"
     required: false
-    default: 'Dockerfile'
+    default: "Dockerfile"
   build-args:
     description: "List of build-time variables"
     required: false
   organization:
-    description: 'Organization'
+    description: "Organization"
     required: true
   repository:
-    description: 'Repository'
+    description: "Repository"
     required: true
+  source:
+    description: >-
+      Git repository URL for the `org.opencontainers.image.source` label. Defaults to the
+      repository running the workflow. Datadog reads this label (with
+      `org.opencontainers.image.revision`) to tag telemetry and DORA deployments with git
+      metadata, so it must name the source repo, not the image. Set it only when building
+      code checked out from another repository.
+    required: false
+    default: ""
   registry:
-    description: 'Docker registry'
+    description: "Docker registry"
     required: true
   target:
     description: "Sets the target stage to build"
     required: false
-    default: ''
+    default: ""
   platforms:
     description: "List of target platforms for build (e.g. linux/amd64,linux/arm64,linux/riscv64,linux/ppc64le,linux/s390x,etc)"
     required: false
-    default: 'linux/amd64'
+    default: "linux/amd64"
   provenance:
     description: "Generate provenance attestation for the build"
     required: false
   image_name:
     description: "Image name (excluding registry). Defaults to {{$organization/$repository}}."
     required: false
-    default: ''
+    default: ""
   login:
-    description: 'Docker login'
+    description: "Docker login"
     required: false
-    default: ''
+    default: ""
   password:
-    description: 'Docker password'
+    description: "Docker password"
     required: false
-    default: ''
+    default: ""
   cache-from:
     description: "List of external cache sources for buildx (e.g., user/app:cache, type=local,src=path/to/dir)"
     required: false
@@ -98,9 +107,13 @@ inputs:
     required: false
     default: "false"
   inspect:
-    description: "Set to `true` will pull and inspect the image and output it to the step summary."
+    description: "Set to `true` will inspect the image from the registry and output it."
     required: false
     default: "false"
+  summary:
+    description: "Set to `true` will create step summary."
+    required: false
+    default: "true"
   debug:
     description: "Enable debug mode"
     required: false
@@ -118,7 +131,10 @@ outputs:
     value: ${{ steps.tag.outputs.output }}
   metadata:
     description: "Docker image metadata"
-    value: ${{ steps.get-metadata.outputs.metadata }}
+    value: ${{ toJSON(steps.docker-build-push-action.outputs.metadata) }}
+  inspect:
+    description: "Docker image inspect metadata"
+    value: ${{ toJSON(steps.inspect.outputs.metadata) }}
 
 runs:
   using: "composite"
@@ -134,7 +150,7 @@ runs:
         fi
     - name: Docker meta
       id: meta
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@v6
       env:
         # Annoyingly, docker computes the SHA tags independently of any checkout
         # action. This option tells this action to use the PR HEAD SHA during a
@@ -161,9 +177,9 @@ runs:
           type=sha,format=long,priority=1001
           ${{ inputs.tags }}
         labels: |
-          org.opencontainers.image.source=https://github.com/${{ inputs.organization }}/${{ inputs.repository }}
+          org.opencontainers.image.source=${{ inputs.source || format('{0}/{1}', github.server_url, github.repository) }}
 
-    - name: 'Install jq 1.6'
+    - name: "Install jq 1.6"
       uses: dcarbone/install-jq-action@v3.2.0
       with:
         version: 1.6
@@ -174,7 +190,7 @@ runs:
     # If a custom tag is added we can add a priority higher than that to set that as the output.
     # https://github.com/docker/metadata-action#priority-attribute
     # this formula is, of the tags, grab the first (highest priority), then split by : for the tag, grab the tag (last element)
-    - uses: cloudposse/github-action-jq@0.4.0
+    - uses: cloudposse/github-action-jq@v0.4.1
       id: tag
       with:
         compact: true
@@ -191,25 +207,24 @@ runs:
         docker context create buildx-context || true
 
     - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
+      uses: docker/setup-qemu-action@v4
       with:
         image: ${{ inputs.binfmt-image }}
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
       with:
         endpoint: buildx-context
-        buildkitd-flags: "${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.buildkitd-flags }}" 
+        buildkitd-flags: "${{ inputs.debug == 'true' && '--debug' || '' }} ${{ inputs.buildkitd-flags }}"
         driver-opts: "${{ inputs.driver-opts }}"
 
     - name: Login
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       if: ${{ contains(inputs.registry, '.amazonaws.com') || ( inputs.login != '' && inputs.password != '' ) }}
       with:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.login }}
         password: ${{ inputs.password }}
-
 
     # Replaces docker/build-push-action@v5 with a direct `docker buildx build --push`
     # invocation wrapped in a throttle-aware retry loop. ECR's PutImage TPS limits
@@ -338,9 +353,7 @@ runs:
           attempt=$(( attempt + 1 ))
         done
 
-        # Emit the same outputs docker/build-push-action would have, so the
-        # downstream "Get Metadata" step (which keys off this step's id) is
-        # unaffected.
+        # Emit the build metadata for the action output.
         echo "metadata-file=$metadata_file" >> "$GITHUB_OUTPUT"
         {
           echo 'metadata<<BUILDX_METADATA_EOF'
@@ -348,44 +361,125 @@ runs:
           echo
           echo 'BUILDX_METADATA_EOF'
         } >> "$GITHUB_OUTPUT"
-
-    - name: Get Metadata
-      id: get-metadata
+    - name: Docker Inspect
+      id: inspect
+      if: ${{ inputs.summary == 'true' }}
       shell: bash
+      env:
+        IMAGE_REF: "${{ inputs.registry }}/${{ steps.image_name.outputs.image_name }}:${{ steps.tag.outputs.output }}"
+        IMAGE_TAG: "${{ steps.tag.outputs.output }}"
       run: |
         set -euo pipefail
 
-        # Prefer the metadata file emitted by docker/build-push-action (avoids shell quoting pitfalls).
-        metadata_file="${{ steps.docker-build-push-action.outputs.metadata-file }}"
+        # Registry-side inspect, not `docker pull` + `docker inspect`. The pull ran on
+        # the runner's own architecture, so it failed outright whenever the image was
+        # not built for the runner -- a linux/arm64 build on an amd64 runner reads as a
+        # build failure long after the push succeeded -- and for a multi-platform index
+        # it quietly described whichever variant the runner resolved. imagetools reads
+        # the manifest straight from the registry: no layer download, every platform
+        # reported, and the same result whatever the runner is. It also keeps this step
+        # honest as a post-push check that the tag really is resolvable in ECR.
+        docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .}}' > inspect.json
 
-        # Some buildx versions omit metadata-file; fall back to the raw output, but
-        # write it to a temp file via heredoc so embedded quotes/newlines cannot
-        # break shell parsing.
-        if [ -z "$metadata_file" ] || [ ! -f "$metadata_file" ]; then
-        metadata_file="$(mktemp)"
-        cat <<'EOF' > "$metadata_file"
-        ${{ steps.docker-build-push-action.outputs.metadata }}
-        EOF
-        fi
+        # `.image` is a bare config object for a single-platform image and a map keyed
+        # by "os/arch" for an index. Normalise to the map so everything below reads one
+        # shape. Attestation manifests never appear here, only real platforms.
+        jq 'if (.image | has("config"))
+              then .image = {"\(.image.os)/\(.image.architecture)": .image}
+              else . end' inspect.json > normalised.json
+        mv normalised.json inspect.json
 
-        metadata=$(jq -c . "$metadata_file")
+        echo "metadata=$(jq -c '.' inspect.json)" >> "$GITHUB_OUTPUT"
 
-        echo "metadata=$metadata" >> "$GITHUB_OUTPUT"
-        echo "## Docker Image Metadata" >> "$GITHUB_STEP_SUMMARY"
-        echo '```json' >> "$GITHUB_STEP_SUMMARY"
-        echo "$metadata" | jq >> "$GITHUB_STEP_SUMMARY"
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        # ── parse fields ────────────────────────────────────────────────────────
+        # Labels are identical across platforms in a single build, so the header reads
+        # them off the first entry; anything genuinely per-platform is tabulated below.
+        # Strip the tag, not everything after the first colon -- a registry host can
+        # carry a port (localhost:5000/foo:tag).
+        IMAGE_REPO=$(jq -r '.name | sub(":[^:/]+$"; "")'            inspect.json)
+        DIGEST=$(jq -r     '.manifest.digest'                       inspect.json)
+        PLATFORMS=$(jq -r  '.image | keys | join(", ")'             inspect.json)
+        FIRST='.image | to_entries[0].value'
+        REVISION=$(jq -r    "$FIRST | .config.Labels[\"org.opencontainers.image.revision\"] // \"n/a\"" inspect.json)
+        SOURCE=$(jq -r      "$FIRST | .config.Labels[\"org.opencontainers.image.source\"] // \"n/a\""   inspect.json)
+        LICENSE=$(jq -r     "$FIRST | .config.Labels[\"org.opencontainers.image.licenses\"] // \"n/a\"" inspect.json)
+        DESCRIPTION=$(jq -r "$FIRST | .config.Labels[\"org.opencontainers.image.description\"] // \"\"" inspect.json)
 
-    - name: Docker Inspect
-      id: inspect
-      if:  ${{ inputs.inspect }} == 'true'
-      shell: bash
-      run: |
-        docker pull "${{ inputs.registry }}/${{ steps.image_name.outputs.image_name }}:${{ steps.tag.outputs.output }}"
-        docker inspect "${{ inputs.registry }}/${{ steps.image_name.outputs.image_name }}:${{ steps.tag.outputs.output }}" > inspect.json
-        metadata=$(jq -c < inspect.json)
-        echo "metadata=$metadata" >> $GITHUB_OUTPUT
-        echo "## Docker Image Inspect" >> $GITHUB_STEP_SUMMARY
-        echo '```json' >> $GITHUB_STEP_SUMMARY
-        cat inspect.json >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
+        # ── summary ─────────────────────────────────────────────────────────────
+        {
+          echo "## 🐳 ${IMAGE_REPO}  &nbsp; \`${LICENSE}\` &nbsp; \`${PLATFORMS}\`"
+          echo ""
+          if [[ -n "${DESCRIPTION}" ]]; then
+            echo "${DESCRIPTION}"
+            echo ""
+          fi
+          echo "---"
+          echo ""
+
+          echo "| Field | Value |"
+          echo "|---|---|"
+          echo "| Tag | \`${IMAGE_TAG}\` |"
+          echo "| Digest | \`${DIGEST}\` |"
+          echo "| Platforms | \`${PLATFORMS}\` |"
+          echo "| Revision | \`${REVISION}\` |"
+          echo "| Source | ${SOURCE} |"
+          echo ""
+
+          # runtime, per platform (collapsible)
+          echo "<details>"
+          echo "<summary>⚙️ Runtime</summary>"
+          echo ""
+          echo "| Platform | Entrypoint | Command | Stop signal | Exposed ports | Layers |"
+          echo "|---|---|---|---|---|---|"
+          jq -r '.image | to_entries[] |
+            "| `\(.key)` | `\(.value.config.Entrypoint // [] | join(" "))` | `\(.value.config.Cmd // [] | join(" "))` | `\(.value.config.StopSignal // "n/a")` | `\(.value.config.ExposedPorts // {} | keys | join(", "))` | \(.value.rootfs.diff_ids // [] | length) |"' inspect.json
+          echo ""
+          echo "</details>"
+          echo ""
+
+          # env vars (collapsible)
+          echo "<details>"
+          echo "<summary>🌱 Environment variables</summary>"
+          echo ""
+          echo "| Platform | Variable | Value |"
+          echo "|---|---|---|"
+          jq -r '.image | to_entries[] as $p | $p.value.config.Env // [] | .[] | split("=") |
+            "| `\($p.key)` | `\(.[0])` | `\(.[1:] | join("="))` |"' inspect.json
+          echo ""
+          echo "</details>"
+          echo ""
+
+          # labels (collapsible)
+          echo "<details>"
+          echo "<summary>🔖 Labels</summary>"
+          echo ""
+          echo "| Label | Value |"
+          echo "|---|---|"
+          jq -r '.image | to_entries[0].value.config.Labels // {} | to_entries[] | "| `\(.key)` | `\(.value)` |"' inspect.json
+          echo ""
+          echo "</details>"
+          echo ""
+
+          # layers, per platform (collapsible)
+          echo "<details>"
+          echo "<summary>📦 Layers</summary>"
+          echo ""
+          echo "| Platform | # | Digest |"
+          echo "|---|---|---|"
+          jq -r '.image | to_entries[] as $p | $p.value.rootfs.diff_ids // [] | to_entries[] |
+            "| `\($p.key)` | \(.key + 1) | `\(.value)` |"' inspect.json
+          echo ""
+          echo "</details>"
+          echo ""
+
+          # raw json (collapsible)
+          echo "<details>"
+          echo "<summary>📄 Raw JSON</summary>"
+          echo ""
+          echo '```json'
+          jq '.' inspect.json
+          echo '```'
+          echo ""
+          echo "</details>"
+
+        } >> $GITHUB_STEP_SUMMARY
