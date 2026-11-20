@@ -43,6 +43,15 @@ inputs:
   repository:
     description: "Repository"
     required: true
+  source:
+    description: >-
+      Git repository URL for the `org.opencontainers.image.source` label. Defaults to the
+      repository running the workflow. Datadog reads this label (with
+      `org.opencontainers.image.revision`) to tag telemetry and DORA deployments with git
+      metadata, so it must name the source repo, not the image. Set it only when building
+      code checked out from another repository.
+    required: false
+    default: ""
   registry:
     description: "Docker registry"
     required: true
@@ -168,7 +177,7 @@ runs:
           type=sha,format=long,priority=1001
           ${{ inputs.tags }}
         labels: |
-          org.opencontainers.image.source=https://github.com/${{ inputs.organization }}/${{ inputs.repository }}
+          org.opencontainers.image.source=${{ inputs.source || format('{0}/{1}', github.server_url, github.repository) }}
 
     - name: "Install jq 1.6"
       uses: dcarbone/install-jq-action@v3.2.0
